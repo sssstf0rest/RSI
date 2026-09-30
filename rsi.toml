@@ -1,0 +1,8 @@
+# Commands are argument lists, never shell strings.
+# "python" uses the interpreter running RSI.
+checks = [["python", "-m", "unittest", "discover", "-s", "tests", "-v"]]
+task_timeout_seconds = 900
+check_timeout_seconds = 120
+
+# Leave unset to use Codex's available default model.
+# model = "..."
