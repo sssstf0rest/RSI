@@ -1,0 +1,26 @@
+[Unit]
+Description=RSI private Telegram controls
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=rsi
+Group=rsi
+WorkingDirectory=/srv/rsi
+Environment=HOME=/var/lib/rsi
+Environment=PATH=/srv/rsi/.venv/bin:/var/lib/rsi/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=RSI_REPO=/srv/rsi
+EnvironmentFile=/etc/rsi/telegram.env
+ExecStart=/srv/rsi/.venv/bin/python -m rsi_telegram
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

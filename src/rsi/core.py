@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -13,16 +14,18 @@ import sys
 import tomllib
 import uuid
 
-from rsi.process import check_environment, execute, worker_environment
+from rsi.process import check_environment, execute, worker_environment, process_control, reconcile_process
 
 
 class RSIError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, category: str = "candidate"):
+        super().__init__(message)
+        self.category = category
 
 
 PROTECTED = (
     "src/rsi/", "tests/test_seed.py", "pyproject.toml", "rsi.toml",
-    ".gitignore", "AGENTS.md", ".codex/", ".rsi/",
+    ".gitignore", "AGENTS.md", ".codex/", ".rsi/", "benchmarks/", ".github/",
 )
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -50,17 +53,39 @@ def require_clean(repo: Path) -> None:
         raise RSIError("Commit or stash your changes first. Candidates start from a clean commit.")
 
 
-def permission_args() -> list[str]:
-    return [
+def permission_args(*, workspace: Path | None = None, readonly: bool = False,
+                    restricted: bool = False, extra_reads=()) -> list[str]:
+    options = [
         "-c", 'permissions.rsi.extends=":workspace"',
         "-c", "permissions.rsi.network.enabled=false",
     ]
+    if restricted:
+        # The default :workspace profile permits broad reads. Explicitly confine
+        # generated programs to their workspace and the interpreter runtime.
+        entries = {":root": "deny", ":minimal": "read", ":slash_tmp": "deny"}
+        entries[str(Path(sys.base_prefix).resolve())] = "read"
+        entries[str(Path(sys.prefix).resolve())] = "read"
+        if sys.platform.startswith("linux"):
+            entries["/proc/sys/kernel/random/boot_id"] = "read"
+        for path in extra_reads:
+            entries[str(Path(path).resolve())] = "read"
+        roots = {".": "read" if readonly else "write", ".rsi/check-tmp": "write",
+                 ".git": "read", ".env": "deny"}
+        if workspace:
+            entries[str((workspace / ".rsi" / "check-tmp").resolve())] = "write"
+        # The CLI merges individual dotted overrides into an inherited scalar
+        # filesystem entry incorrectly. Replace the filesystem table atomically.
+        fields = [f"{json.dumps(path)}={json.dumps(mode)}" for path, mode in entries.items()]
+        fields.append('\":workspace_roots\"={' + ",".join(f"{json.dumps(path)}={json.dumps(mode)}" for path, mode in roots.items()) + "}")
+        options += ["-c", "permissions.rsi.filesystem={" + ",".join(fields) + "}"]
+    return options
 
 
-def sandbox_command(codex: str, workspace: Path, command: list[str]) -> list[str]:
+def sandbox_command(codex: str, workspace: Path, command: list[str], *,
+                    readonly: bool = False, restricted: bool = True) -> list[str]:
     return [
         codex, "sandbox", "--permission-profile", "rsi", "-C", str(workspace),
-        "--include-managed-config", *permission_args(),
+        "--include-managed-config", *permission_args(workspace=workspace, readonly=readonly, restricted=restricted),
         "--", *command,
     ]
 
@@ -90,7 +115,16 @@ class Seed:
         for key in ("task_timeout_seconds", "check_timeout_seconds"):
             if type(self.config.get(key)) is not int or self.config[key] <= 0:
                 raise RSIError(f"{key} must be a positive integer.")
+        for key in ("proposal_timeout_seconds", "policy_timeout_seconds", "max_context_chars", "max_observed_tokens"):
+            if key in self.config and (type(self.config[key]) is not int or self.config[key] <= 0):
+                raise RSIError(f"{key} must be a positive integer.")
+        if type(self.config.get("memory_limit", 4)) is not int or not 0 <= self.config.get("memory_limit", 4) <= 16:
+            raise RSIError("memory_limit must be an integer from 0 to 16.")
+        gain = self.config.get("min_score_gain", 0.01)
+        if type(gain) not in (int, float) or not 0 < gain <= 1:
+            raise RSIError("min_score_gain must be in (0,1].")
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY, task TEXT NOT NULL, status TEXT NOT NULL,
@@ -99,6 +133,10 @@ class Seed:
                     detail TEXT NOT NULL DEFAULT '', verified_digest TEXT
                 )
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(runs)")}
+            for column in ("execution", "policy_version", "purpose", "parent_id", "error_category"):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
 
     @contextmanager
     def connection(self):
@@ -130,14 +168,31 @@ class Seed:
             except OSError as exc:
                 raise RSIError("Another RSI operation is running in this repository.") from exc
             try:
+                reconcile_process(self.state / "worker-process.json")
                 # A previous process died without completing its database update.
                 with self.connection() as db:
+                    pending = db.execute("SELECT id,execution FROM runs WHERE status IN ('running','verifying','applying')").fetchall()
+                    for row in pending:
+                        if row["execution"] is not None:
+                            continue
+                        artifacts = self.state / "runs" / row["id"]
+                        record = artifacts / "execution.json"
+                        if record.is_file():
+                            metadata = json.loads(record.read_text(encoding="utf-8"))
+                        elif (artifacts / "worker.log").is_file():
+                            metadata = {"outcome": "interrupted", "error_category": "interrupted",
+                                        "usage": {"input_tokens": None, "output_tokens": None},
+                                        "log_path": str(artifacts / "worker.log")}
+                        else:
+                            continue
+                        db.execute("UPDATE runs SET execution=? WHERE id=?", (json.dumps(metadata), row["id"]))
                     db.execute(
                         "UPDATE runs SET status='interrupted', updated_at=?, detail=? "
                         "WHERE status IN ('running','verifying','applying')",
                         (now(), "Previous operation ended unexpectedly; inspect its artifacts."),
                     )
-                yield
+                with process_control(registry=self.state / "worker-process.json"):
+                    yield
             finally:
                 if os.name == "nt":
                     handle.seek(0)
@@ -155,6 +210,14 @@ class Seed:
     def runs(self) -> list[dict]:
         with self.connection() as db:
             return [dict(row) for row in db.execute("SELECT * FROM runs ORDER BY created_at DESC")]
+
+    def run_cursor(self) -> int:
+        with self.connection() as db:
+            return db.execute("SELECT COALESCE(MAX(rowid),0) FROM runs").fetchone()[0]
+
+    def runs_after(self, cursor: int) -> list[dict]:
+        with self.connection() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM runs WHERE rowid>? ORDER BY rowid DESC", (cursor,))]
 
     def update(self, run_id: str, status: str, detail: str = "", digest: str | None = None):
         with self.connection() as db:
@@ -194,6 +257,19 @@ class Seed:
                 raise RSIError(f"Secret configuration must not be released: {name}")
             if (workspace / name).is_symlink():
                 raise RSIError(f"Candidate symlinks are not supported: {name}")
+            parts = Path(name).parts
+            if any(part in ("AGENTS.md", "CLAUDE.md", ".git", ".codex", ".agents") for part in parts):
+                raise RSIError(f"Agent configuration is outside the modification allowlist: {name}")
+            eligible = (
+                bool(re.fullmatch(r"src/rsi_[A-Za-z0-9_]+/.+\.(py|md|json)", name))
+                or bool(re.fullmatch(r"tests/test_[A-Za-z0-9_]+\.py", name))
+                or name == "README.md"
+                or bool(re.fullmatch(r"(?:docs|tasks)/.+\.md", name))
+            )
+            if not eligible:
+                raise RSIError(f"Path is outside the modification allowlist: {name}")
+            if (run.get("purpose") or "capability") == "policy" and not name.startswith("src/rsi_policy/"):
+                raise RSIError(f"Policy experiments can only edit src/rsi_policy/: {name}")
         patch = git(workspace, "diff", "--binary", "HEAD", "--")
         (self.artifacts(run_id) / "candidate.patch").write_bytes(patch)
         return patch
@@ -229,6 +305,8 @@ class Seed:
                 env=check_environment(self.repo, self.sandbox_home),
             )
             report["sandbox"] = code == 0
+            if code:
+                report["sandbox_error"] = log.read_text(encoding="utf-8", errors="replace")[-2000:].strip()
         except (OSError, RuntimeError) as exc:
             report["sandbox"] = False
             report["sandbox_error"] = str(exc)
@@ -236,7 +314,9 @@ class Seed:
         report["ready"] = all(report.get(key) for key in ("clean", "chatgpt_authenticated", "sandbox"))
         return report
 
-    def run_task(self, task: str) -> dict:
+    def run_task(self, task: str, *, purpose: str = "capability", parent_id: str | None = None,
+                 parent_policy: Path | None = None, candidate_policy: Path | None = None,
+                 memory_enabled: bool = True, timeout_seconds: int | None = None) -> dict:
         if not task.strip():
             raise RSIError("A task must not be empty.")
         with self.operation():
@@ -253,9 +333,18 @@ class Seed:
                     "VALUES (?,?,?,?,?,?,?,?)",
                     (run_id, task, "running", branch, str(workspace), base, now(), now()),
                 )
+            with self.connection() as db:
+                db.execute("UPDATE runs SET purpose=?,parent_id=? WHERE id=?", (purpose, parent_id, run_id))
             print(f"Run {run_id}: {workspace}", flush=True)
             try:
                 git(self.repo, "worktree", "add", "-b", branch, str(workspace), base)
+                if purpose == "policy":
+                    from rsi.archive import copy_policy
+                    if parent_policy:
+                        copy_policy(parent_policy, workspace / "src" / "rsi_policy", replace=True)
+                    if candidate_policy:
+                        copy_policy(candidate_policy, workspace / "src" / "rsi_policy", replace=True)
+                (workspace / ".rsi" / "check-tmp").mkdir(parents=True, exist_ok=True)
                 prompt = (
                     "Implement the user's task in this candidate workspace. "
                     "Use Python's standard library unless the task explicitly requires otherwise. "
@@ -269,49 +358,53 @@ class Seed:
                     "The supervisor will independently run checks before a human can apply changes.\n\n"
                     "Task:\n" + task
                 )
+                from rsi.evolution import task_context
+                context, policy_id = task_context(self, task, artifacts, memory_enabled=memory_enabled)
+                if policy_id:
+                    with self.connection() as db:
+                        db.execute("UPDATE runs SET policy_version=? WHERE id=?", (policy_id, run_id))
+                if context:
+                    prompt += "\n\nSelected policy context (task instructions take precedence):\n" + context
                 (artifacts / "task.txt").write_text(task, encoding="utf-8")
-                command = [
-                    self.codex, "exec", "--json", "--ignore-user-config",
-                    "-c", 'default_permissions="rsi"', *permission_args(),
-                    "-c", 'approval_policy="never"',
-                    "-c", 'forced_login_method="chatgpt"',
-                    "-c", 'shell_environment_policy.inherit="core"',
-                    "-c", "shell_environment_policy.ignore_default_excludes=false",
-                    "-C", str(workspace), "-o", str(workspace / ".rsi-response.txt"),
-                ]
-                if self.config.get("model"):
-                    command.extend(["--model", self.config["model"]])
-                command.append("-")
-                code = execute(
-                    command, cwd=workspace, log=artifacts / "worker.log",
-                    timeout=self.config["task_timeout_seconds"], input_text=prompt,
-                    env=worker_environment(),
-                )
-                response = workspace / ".rsi-response.txt"
-                if response.exists():
-                    shutil.move(str(response), str(artifacts / "response.txt"))
-                if code:
-                    raise RSIError(f"Codex exited {code}; inspect {artifacts / 'worker.log'}.")
-                events = []
-                for line in (artifacts / "worker.log").read_text(encoding="utf-8", errors="replace").splitlines():
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(event, dict):
-                        events.append(event.get("type"))
-                if "turn.completed" not in events or any(
-                    event in ("turn.failed", "error") for event in events
-                ):
-                    raise RSIError(f"No successful Codex turn; inspect {artifacts / 'worker.log'}.")
+                if candidate_policy is None:
+                    from rsi.backends.codex import CodexBackend
+                    result = CodexBackend(self.codex, self.config.get("model"), self.config.get("reasoning_effort")).run(
+                        prompt, workspace, artifacts, timeout_seconds or self.config["task_timeout_seconds"],
+                        execute_fn=execute,
+                        permission_options=permission_args(workspace=workspace, restricted=True,
+                                                          extra_reads=[self.repo / ".git"]),
+                    )
+                    with self.connection() as db:
+                        db.execute("UPDATE runs SET execution=?,error_category=? WHERE id=?",
+                                   (json.dumps(result.to_dict()), result.error_category, run_id))
+                    if not result.success:
+                        prefix = "No successful Codex turn: " if result.exit_code == 0 else ""
+                        raise RSIError(f"{prefix}{result.error}; inspect {artifacts / 'worker.log'}.")
+                else:
+                    (artifacts / "execution.json").write_text(json.dumps({
+                        "outcome": "provided_candidate", "usage": {"input_tokens": 0, "output_tokens": 0},
+                        "model": self.config.get("model"), "reasoning_effort": self.config.get("reasoning_effort"),
+                        "source": str(candidate_policy.resolve()),
+                    }, indent=2), encoding="utf-8")
                 self.snapshot(run_id)
                 self.update(run_id, "proposed", "Candidate is ready for independent verification.")
             except KeyboardInterrupt:
                 self.update(run_id, "interrupted", "Cancelled by user.")
+                record = artifacts / "execution.json"
+                if record.is_file():
+                    execution = json.loads(record.read_text(encoding="utf-8"))
+                    with self.connection() as db:
+                        db.execute("UPDATE runs SET execution=?,error_category=? WHERE id=?",
+                                   (json.dumps(execution), execution.get("error_category"), run_id))
                 raise
             except Exception as exc:
                 self.update(run_id, "failed", str(exc))
-                raise RSIError(f"Run {run_id}: {exc}") from exc
+                category = self.get(run_id).get("error_category") or getattr(exc, "category", "candidate")
+                with self.connection() as db:
+                    db.execute("UPDATE runs SET error_category=? WHERE id=?", (category, run_id))
+                from rsi.archive import remember_run
+                remember_run(self, run_id, "failed", str(exc))
+                raise RSIError(f"Run {run_id}: {exc}", category=category) from exc
             return self.get(run_id)
 
     def verify(self, run_id: str) -> dict:
@@ -330,22 +423,30 @@ class Seed:
                 for index, check in enumerate(self.config["checks"], start=1):
                     args = [sys.executable if check[0] == "python" else check[0], *check[1:]]
                     log = self.artifacts(run_id) / f"check-{index}.log"
+                    wrapped = [sys.executable, "-I", "-c",
+                        "import subprocess,sys; print('RSI_CHECK_STARTED',flush=True); sys.exit(subprocess.call(sys.argv[1:]))", *args]
                     result = execute(
-                        sandbox_command(self.codex, workspace, args),
+                        sandbox_command(self.codex, workspace, wrapped),
                         cwd=workspace, log=log, timeout=self.config["check_timeout_seconds"],
                         env=check_environment(workspace, self.sandbox_home),
                     )
                     if result:
-                        raise RSIError(f"Check {index} exited {result}; inspect {log}.")
+                        category = "candidate" if "RSI_CHECK_STARTED" in log.read_text(encoding="utf-8", errors="replace") else "infrastructure"
+                        raise RSIError(f"Check {index} exited {result}; inspect {log}.", category=category)
                 if hashlib.sha256(self.snapshot(run_id)).hexdigest() != digest:
                     raise RSIError("Candidate changed during verification. Review and verify again.")
                 self.update(run_id, "verified", "Configured checks passed.", digest)
+                from rsi.archive import remember_run
+                remember_run(self, run_id, "verified", "Configured regression checks passed.")
             except KeyboardInterrupt:
                 self.update(run_id, "interrupted", "Verification cancelled.")
                 raise
             except Exception as exc:
                 self.update(run_id, "failed", str(exc))
-                raise RSIError(f"Verification failed: {exc}") from exc
+                category = getattr(exc, "category", "candidate")
+                with self.connection() as db:
+                    db.execute("UPDATE runs SET error_category=? WHERE id=?", (category, run_id))
+                raise RSIError(f"Verification failed: {exc}", category=category) from exc
             return self.get(run_id)
 
     def apply(self, run_id: str) -> dict:

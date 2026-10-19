@@ -1,0 +1,24 @@
+[Unit]
+Description=RSI bounded single-worker queue
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=rsi
+Group=rsi
+WorkingDirectory=/srv/rsi
+Environment=HOME=/var/lib/rsi
+Environment=PATH=/srv/rsi/.venv/bin:/var/lib/rsi/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/srv/rsi/.venv/bin/rsi --repo /srv/rsi worker --serve --poll-seconds 5
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

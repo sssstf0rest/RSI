@@ -2,7 +2,19 @@
 # "python" uses the interpreter running RSI.
 checks = [["python", "-m", "unittest", "discover", "-s", "tests", "-v"]]
 task_timeout_seconds = 3600
-check_timeout_seconds = 120
+check_timeout_seconds = 300
 
-# Leave unset to use Codex's available default model.
-# model = "..."
+# Keep comparisons on an explicit account-supported model and reasoning setting.
+model = "gpt-6.1-sol"
+reasoning_effort = "medium"
+
+proposal_timeout_seconds = 600
+policy_timeout_seconds = 60
+benchmark_path = "benchmarks/context.json"
+max_context_chars = 6000
+memory_limit = 4
+min_score_gain = 0.01
+
+# Observed input+output tokens; cached input is not counted twice. This stops
+# future scheduling, not an unsupported hard token ceiling inside codex exec.
+max_observed_tokens = 200000
