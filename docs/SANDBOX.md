@@ -32,6 +32,10 @@ default avoids both the broad write grant and that ancestor mask. See the
 
 Unit tests substitute sandbox command execution only for small fixture programs.
 They verify protocol behavior and evaluation but cannot establish OS isolation.
+Evaluator and evolution tests use a frozen baseline in `tests/fixtures` so their
+expected comparisons remain stable when checks run from an improved policy's
+candidate worktree. The live candidate still passes protocol and behavioral
+evaluation separately.
 The additional integration test uses the actual sandbox without model inference:
 
 ```bash
@@ -47,9 +51,10 @@ execution. No ChatGPT login or API key is needed for this local test.
 ## Verification environments
 
 The CI configuration runs ordinary tests on Linux and Windows with Python 3.11
-and 3.13. A separate Ubuntu 22.04 job installs official Codex and bubblewrap and
-runs the real boundary checks. This workflow has been prepared locally; a green
-CI result must be observed after publication. Ubuntu 22.04 CI does not establish
+and 3.13. A separate Ubuntu 22.04 job installs official Codex and bubblewrap,
+runs the real boundary checks, and completes an offline evolution experiment
+through the production sandbox. Both steps must pass. On failure, CI prints the
+nested regression log. Ubuntu 22.04 CI does not establish
 compatibility with Raspberry Pi ARM64 or Ubuntu Server 24.04.
 
 On the development Windows host, Codex CLI 0.163.0-alpha.10.2 rejected the

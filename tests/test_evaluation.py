@@ -13,6 +13,7 @@ from rsi.process import execute
 
 
 REPO = Path(__file__).resolve().parents[1]
+BASELINE_POLICY = Path(__file__).resolve().parent / "fixtures" / "baseline_policy"
 
 
 class EvaluationTests(unittest.TestCase):
@@ -39,7 +40,7 @@ class EvaluationTests(unittest.TestCase):
         return self.evaluator.evaluate(policy, self.runner, artifacts=self.root / uuid.uuid4().hex, **kwargs)
 
     def test_measured_lexical_improvement_uses_real_subprocesses(self):
-        baseline = self.evaluate(REPO / "src" / "rsi_policy")
+        baseline = self.evaluate(BASELINE_POLICY)
         improved = self.evaluate(REPO / "benchmarks" / "examples" / "lexical")
         self.assertEqual(baseline["status"], "completed")
         self.assertGreater(improved["score"], baseline["score"])
