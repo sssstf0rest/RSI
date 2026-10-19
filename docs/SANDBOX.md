@@ -9,6 +9,17 @@ read-only, permits a local temporary directory, and disables direct network
 access. Expected evidence labels and evaluation reports remain outside the
 worker workspace.
 
+On Linux, the profile also permits the exact installed Codex executable and its
+bootstrap helper directories (`CODEX_HOME/tmp/arg0` and `tmp/arg0-linux`) read-only.
+For npm installations, the native executable is resolved separately from the
+JavaScript launcher, including nested and hoisted platform packages. The rest of
+the isolated Codex home stays denied. Older bubblewrap versions, including the
+one supplied by Ubuntu 22.04, need the live `codex-linux-sandbox` PATH alias during
+startup; hiding it causes `bwrap: execvp codex-linux-sandbox: No such file or directory`.
+Newer bubblewrap versions also need access to the native executable itself.
+See the official [helper re-execution logic](https://github.com/openai/codex/blob/rust-v0.162.0/codex-rs/linux-sandbox/src/linux_run_main.rs#L500-L544)
+and [npm launcher](https://github.com/openai/codex/blob/rust-v0.162.0/codex-cli/bin/codex.js#L93-L113).
+
 Unit tests substitute sandbox command execution only for small fixture programs.
 They verify protocol behavior and evaluation but cannot establish OS isolation.
 The additional integration test uses the actual sandbox without model inference:
@@ -17,8 +28,9 @@ The additional integration test uses the actual sandbox without model inference:
 RSI_REAL_SANDBOX=1 python -m unittest discover -s tests -p test_sandbox_integration.py -v
 ```
 
-It verifies ordinary policy execution, denial of a known outside canary read,
-denial of policy-source writes, and successful local temporary-file writes.
+It verifies ordinary policy execution, denial of known outside and private Codex
+home canary reads, denial of policy-source writes, and successful local
+temporary-file writes.
 An unsupported sandbox fails this opt-in check; it does not fall back to direct
 execution. No ChatGPT login or API key is needed for this local test.
 

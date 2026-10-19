@@ -81,11 +81,39 @@ def permission_args(*, workspace: Path | None = None, readonly: bool = False,
     return options
 
 
-def sandbox_command(codex: str, workspace: Path, command: list[str], *,
+def _sandbox_runtime_reads(codex: str, sandbox_home: Path) -> list[Path]:
+    # Old bubblewrap re-execs through Codex's live PATH alias; newer versions
+    # use the native executable directly. Keep both visible without exposing
+    # the rest of CODEX_HOME (which may contain credentials).
+    reads = [sandbox_home / "tmp" / name for name in ("arg0", "arg0-linux")]
+    executable = shutil.which(codex)
+    if executable:
+        launcher = Path(executable).resolve()
+        reads.append(launcher)
+        if launcher.name == "codex.js" and launcher.parent.name == "bin":
+            package = launcher.parent.parent
+            vendors = [package / "vendor"]
+            # Match Node's optional-package lookup, including npm's nested
+            # dependency layout and platform packages hoisted by other clients.
+            for name in ("codex-linux-x64", "codex-linux-arm64"):
+                for parent in (package, *package.parents):
+                    platform_package = parent / "node_modules" / "@openai" / name
+                    if platform_package.is_dir():
+                        vendors.append(platform_package / "vendor")
+                        break
+            for vendor in vendors:
+                for pattern in ("*/bin/codex", "*/codex/codex"):
+                    reads.extend(path.resolve() for path in vendor.glob(pattern) if path.is_file())
+    return reads
+
+
+def sandbox_command(codex: str, workspace: Path, command: list[str], *, sandbox_home: Path,
                     readonly: bool = False, restricted: bool = True) -> list[str]:
+    runtime_reads = _sandbox_runtime_reads(codex, sandbox_home) if restricted and sys.platform.startswith("linux") else ()
     return [
         codex, "sandbox", "--permission-profile", "rsi", "-C", str(workspace),
-        "--include-managed-config", *permission_args(workspace=workspace, readonly=readonly, restricted=restricted),
+        "--include-managed-config", *permission_args(workspace=workspace, readonly=readonly, restricted=restricted,
+                                                   extra_reads=runtime_reads),
         "--", *command,
     ]
 
@@ -300,7 +328,7 @@ class Seed:
                 "print('sandbox workspace and temp writes ready')"
             )
             code = execute(
-                sandbox_command(self.codex, self.repo, [sys.executable, "-c", probe]),
+                sandbox_command(self.codex, self.repo, [sys.executable, "-c", probe], sandbox_home=self.sandbox_home),
                 cwd=self.repo, log=log, timeout=self.config["check_timeout_seconds"],
                 env=check_environment(self.repo, self.sandbox_home),
             )
@@ -426,7 +454,7 @@ class Seed:
                     wrapped = [sys.executable, "-I", "-c",
                         "import subprocess,sys; print('RSI_CHECK_STARTED',flush=True); sys.exit(subprocess.call(sys.argv[1:]))", *args]
                     result = execute(
-                        sandbox_command(self.codex, workspace, wrapped),
+                        sandbox_command(self.codex, workspace, wrapped, sandbox_home=self.sandbox_home),
                         cwd=workspace, log=log, timeout=self.config["check_timeout_seconds"],
                         env=check_environment(workspace, self.sandbox_home),
                     )

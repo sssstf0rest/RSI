@@ -33,17 +33,21 @@ class RealSandboxTests(unittest.TestCase):
     def test_external_read_and_policy_write_denied_but_local_temp_allowed(self):
         canary = self.root / "outside-canary.txt"
         canary.write_text("hidden evaluator answers must remain inaccessible", encoding="utf-8")
+        self.runner.sandbox_home.mkdir(parents=True)
+        home_canary = self.runner.sandbox_home / "private-canary.txt"
+        home_canary.write_text("private Codex home contents must remain inaccessible", encoding="utf-8")
         policy = self.root / "source"
         policy.mkdir()
         source = '''import json, sys, tempfile
 from pathlib import Path
 json.load(sys.stdin)
 observed = {}
-try:
-    Path(CANARY).read_text()
-    observed["outside_read_denied"] = False
-except OSError:
-    observed["outside_read_denied"] = True
+for key, path in (("outside_read_denied", CANARY), ("codex_home_read_denied", HOME_CANARY)):
+    try:
+        Path(path).read_text()
+        observed[key] = False
+    except OSError:
+        observed[key] = True
 try:
     Path(__file__).write_text("changed")
     observed["policy_write_denied"] = False
@@ -54,11 +58,12 @@ with tempfile.TemporaryFile() as stream:
     stream.flush()
 observed["temporary_write_allowed"] = True
 print(json.dumps({"selected_ids": [], "instructions": json.dumps(observed)}))
-'''.replace("CANARY", repr(str(canary)))
+'''.replace("HOME_CANARY", repr(str(home_canary))).replace("CANARY", repr(str(canary)))
         (policy / "policy.py").write_text(source, encoding="utf-8")
         result = self.runner.run(policy, self.request, artifacts=self.root / "boundary")
         observed = json.loads(result["instructions"])
-        self.assertEqual(observed, {"outside_read_denied": True, "policy_write_denied": True,
+        self.assertEqual(observed, {"outside_read_denied": True, "codex_home_read_denied": True,
+                                    "policy_write_denied": True,
                                     "temporary_write_allowed": True})
         self.assertEqual(canary.read_text(), "hidden evaluator answers must remain inaccessible")
 

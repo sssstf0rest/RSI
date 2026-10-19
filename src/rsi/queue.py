@@ -1,5 +1,7 @@
 """Durable single-worker jobs and idempotent Telegram control commands."""
 
+from __future__ import annotations
+
 from contextlib import contextmanager
 import json
 import math

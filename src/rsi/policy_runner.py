@@ -179,7 +179,8 @@ class PolicyRunner:
         (artifacts / "request.json").write_text(input_text, encoding="utf-8")
         log = artifacts / "policy.log"
         command = (self.command_builder or sandbox_command)(
-            self.codex, workspace, [sys.executable, "-I", str(wrapper)], readonly=True, restricted=True
+            self.codex, workspace, [sys.executable, "-I", str(wrapper)], sandbox_home=self.sandbox_home,
+            readonly=True, restricted=True
         )
         started_at = time.monotonic()
         code = None
