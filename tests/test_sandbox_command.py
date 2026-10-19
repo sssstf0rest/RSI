@@ -5,6 +5,7 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
+from rsi.core import permission_args
 from rsi.policy_runner import PolicyRunner
 from rsi.process import execute
 from test_seed import TemporaryWorkspace
@@ -50,7 +51,7 @@ class SandboxCommandTests(unittest.TestCase):
         self.assertNotIn(str(self.home.resolve()), filesystem)
         self.assertNotIn(str(self.home.parent.resolve()), filesystem)
         self.assertEqual(filesystem[":root"], "deny")
-        self.assertEqual(filesystem[":slash_tmp"], "deny")
+        self.assertNotIn(":slash_tmp", filesystem)
         self.assertEqual(filesystem[":workspace_roots"]["."], "read")
         self.assertEqual(filesystem[":workspace_roots"][".env"], "deny")
         self.assertIn("permissions.rsi.network.enabled=false", self.command)
@@ -79,6 +80,22 @@ class SandboxCommandTests(unittest.TestCase):
                 self.assertEqual(filesystem.get(str(native)), "read", "npm's native target must survive the mount namespace")
                 self.assertNotIn(str(launcher.parent.parent), filesystem)
                 self.assertNotIn(str(native.parent), filesystem)
+
+    def test_restricted_profile_does_not_mask_readable_temp_descendants_or_inherit_global_temp_writes(self):
+        options = permission_args(workspace=self.root, restricted=True)
+        profile = tomllib.loads("\n".join(options[1::2]))["permissions"]["rsi"]
+        # :workspace would inherit global temp writes. Masking /tmp to undo
+        # them then hides read-only helpers/policies mounted beneath /tmp.
+        self.assertEqual(profile["extends"], ":read-only")
+        filesystem = profile["filesystem"]
+        self.assertEqual(filesystem[":root"], "deny")
+        self.assertNotIn(":slash_tmp", filesystem)
+        self.assertNotIn(":tmpdir", filesystem)
+        roots = filesystem[":workspace_roots"]
+        self.assertEqual(roots["."], "write")
+        self.assertEqual(roots[".rsi/check-tmp"], "write")
+        for path in (".git", ".agents", ".codex", ".aws"):
+            self.assertEqual(roots[path], "read")
 
 
 if __name__ == "__main__":

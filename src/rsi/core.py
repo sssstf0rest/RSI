@@ -56,13 +56,16 @@ def require_clean(repo: Path) -> None:
 def permission_args(*, workspace: Path | None = None, readonly: bool = False,
                     restricted: bool = False, extra_reads=()) -> list[str]:
     options = [
-        "-c", 'permissions.rsi.extends=":workspace"',
+        "-c", 'permissions.rsi.extends=' + json.dumps(":read-only" if restricted else ":workspace"),
         "-c", "permissions.rsi.network.enabled=false",
     ]
     if restricted:
         # The default :workspace profile permits broad reads. Explicitly confine
         # generated programs to their workspace and the interpreter runtime.
-        entries = {":root": "deny", ":minimal": "read", ":slash_tmp": "deny"}
+        # Inherit no global temp writes. An explicit /tmp deny is also unsafe:
+        # Codex applies that mask after mounting readable descendants, hiding
+        # policy workspaces and its own helper aliases beneath /tmp.
+        entries = {":root": "deny", ":minimal": "read"}
         entries[str(Path(sys.base_prefix).resolve())] = "read"
         entries[str(Path(sys.prefix).resolve())] = "read"
         if sys.platform.startswith("linux"):
@@ -70,7 +73,7 @@ def permission_args(*, workspace: Path | None = None, readonly: bool = False,
         for path in extra_reads:
             entries[str(Path(path).resolve())] = "read"
         roots = {".": "read" if readonly else "write", ".rsi/check-tmp": "write",
-                 ".git": "read", ".env": "deny"}
+                 ".git": "read", ".agents": "read", ".codex": "read", ".aws": "read", ".env": "deny"}
         if workspace:
             entries[str((workspace / ".rsi" / "check-tmp").resolve())] = "write"
         # The CLI merges individual dotted overrides into an inherited scalar
