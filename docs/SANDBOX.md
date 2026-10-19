@@ -20,6 +20,16 @@ Newer bubblewrap versions also need access to the native executable itself.
 See the official [helper re-execution logic](https://github.com/openai/codex/blob/rust-v0.162.0/codex-rs/linux-sandbox/src/linux_run_main.rs#L500-L544)
 and [npm launcher](https://github.com/openai/codex/blob/rust-v0.162.0/codex-cli/bin/codex.js#L93-L113).
 
+Restricted profiles extend `:read-only`, override the default root access to
+`deny`, and allow only their workspace, local temporary directory and runtime
+paths. They explicitly preserve read-only `.git`, `.agents`, `.codex` and `.aws`
+metadata. Inheriting `:workspace` would also inherit global temporary-directory
+writes. Undoing those grants with `:slash_tmp = "deny"` causes another Linux
+startup failure: Codex applies the `/tmp` mask after mounting read-only paths,
+which hides helper aliases and policy workspaces beneath `/tmp`. Denial by
+default avoids both the broad write grant and that ancestor mask. See the
+[upstream mount order](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/linux-sandbox/src/bwrap.rs#L539-L646).
+
 Unit tests substitute sandbox command execution only for small fixture programs.
 They verify protocol behavior and evaluation but cannot establish OS isolation.
 The additional integration test uses the actual sandbox without model inference:
