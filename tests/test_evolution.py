@@ -13,6 +13,7 @@ from test_seed import TemporaryWorkspace
 
 
 PROJECT = Path(__file__).resolve().parents[1]
+BASELINE_POLICY = Path(__file__).resolve().parent / "fixtures" / "baseline_policy"
 
 
 REGRESSIONS = '''import ast, json, pathlib, subprocess, sys, unittest
@@ -58,7 +59,7 @@ class EvolutionFixture(unittest.TestCase):
         )
         (self.repo / "tests").mkdir()
         (self.repo / "tests" / "test_contract.py").write_text(REGRESSIONS, encoding="utf-8")
-        shutil.copytree(PROJECT / "src" / "rsi_policy", self.repo / "src" / "rsi_policy",
+        shutil.copytree(BASELINE_POLICY, self.repo / "src" / "rsi_policy",
                         ignore=shutil.ignore_patterns("__pycache__"))
         (self.repo / "benchmarks").mkdir()
         data = json.loads((PROJECT / "benchmarks" / "context.json").read_text())

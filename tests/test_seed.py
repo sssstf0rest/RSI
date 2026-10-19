@@ -67,7 +67,7 @@ class SeedTests(unittest.TestCase):
     def fake_process(self, command, *, cwd, log, timeout, input_text=None, env=None):
         if "exec" in command:
             self.assertIn('default_permissions="rsi"', command)
-            self.assertIn('permissions.rsi.extends=":workspace"', command)
+            self.assertIn('permissions.rsi.extends=":read-only"', command)
             self.assertIn('forced_login_method="chatgpt"', command)
             self.assertIn("permissions.rsi.network.enabled=false", command)
             self.assertIn("Task:", input_text)

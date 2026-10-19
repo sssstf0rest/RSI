@@ -45,4 +45,15 @@ jobs:
           RSI_REAL_SANDBOX: '1'
         run: python -m unittest discover -s tests -p test_sandbox_integration.py -v
       - name: Complete offline evolution through the production sandbox
-        run: rsi experiment --candidate benchmarks/examples/lexical
+        run: |
+          status=0
+          rsi experiment --candidate benchmarks/examples/lexical || status=$?
+          if [ "$status" -ne 0 ]; then
+            python - <<'PY'
+          from pathlib import Path
+          for path in sorted(Path(".rsi/runs").glob("*/check-*.log")):
+              print(f"\n{path}")
+              print(path.read_text(encoding="utf-8", errors="replace")[-40000:])
+          PY
+          fi
+          exit "$status"
